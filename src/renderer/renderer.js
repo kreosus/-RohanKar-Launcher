@@ -2585,8 +2585,11 @@ function renderHomeRandomPick(forceNew) {
 //
 // Uses the standard Gamepad API (navigator.getGamepads()) polled via rAF.
 // Button indices follow the W3C Standard Gamepad layout (Xbox / PS controllers).
+// Nintendo Switch pads (Pro Controller / Joy-Cons) are detected and their
+// A/B and X/Y face buttons are remapped so the physical labels match the
+// on-screen hints — see gpDetectLayout / gpMapButtonIndex below.
 //
-// Button map:
+// Button map (logical indices — physical face buttons are remapped for Nintendo):
 //   0  = A / Cross        → Confirm / Launch / Select item
 //   1  = B / Circle       → Back / Cancel / Go Home
 //   2  = X / Square       → Install (Download)
@@ -2619,6 +2622,14 @@ const GP = {
   repeatTimers:  {},      // buttonIndex → { started, last }
   rafId:         null,
   hintVisible:   false,
+
+  // Controller layout: 'standard' (Xbox / PlayStation) or 'nintendo'
+  // (Switch Pro Controller, Joy-Cons). Nintendo controllers physically label
+  // their face buttons opposite to Xbox — the button marked "A" sits where
+  // Xbox puts "B" (index 1) and "B" sits where Xbox puts "A" (index 0). We
+  // detect Nintendo pads and remap the face-button indices so the on-screen
+  // A/B/X/Y hints always match the physical labels on the pad in hand.
+  layout:        'standard',
 };
 
 // Button index constants
@@ -2637,6 +2648,34 @@ const BTN_LT     = 6;  // Left trigger  — sidebar: up to menu zone
 const BTN_RT     = 7;  // Right trigger — sidebar: down to games zone
 const BTN_LEFT   = 14; // D-pad left  — cycle detail buttons left / exit detail
 const BTN_RIGHT  = 15; // D-pad right — cycle detail buttons right / enter detail
+
+// ── Nintendo Switch controller support ─────────────────────────────────────────
+// Detect Nintendo pads from the Gamepad id string. Chromium exposes the
+// Switch Pro Controller / Joy-Cons with Nintendo's USB vendor id 057e, and the
+// id text usually contains "Pro Controller", "Joy-Con", "Switch" or "Nintendo".
+function gpDetectLayout(id) {
+  const s = (id || '').toLowerCase();
+  if (/057e|nintendo|switch|joy-?con|pro controller/.test(s)) return 'nintendo';
+  return 'standard';
+}
+
+// Translate a physical face-button index into the launcher's logical index.
+// Only the four face buttons differ between layouts; everything else (bumpers,
+// triggers, d-pad, sticks, start/select) shares the same index on both.
+// Nintendo physical → logical (Xbox-style) mapping:
+//   physical 0 (B, bottom) → logical 1 (BTN_B, back)
+//   physical 1 (A, right)  → logical 0 (BTN_A, confirm)
+//   physical 2 (Y, left)   → logical 3 (BTN_Y, favourite)
+//   physical 3 (X, top)    → logical 2 (BTN_X, install)
+// The swap means a Nintendo user pressing the button labelled "A" confirms and
+// "B" cancels — matching the on-screen hints — instead of the inverse.
+const GP_NINTENDO_FACE_MAP = { 0: 1, 1: 0, 2: 3, 3: 2 };
+function gpMapButtonIndex(physIdx) {
+  if (GP.layout === 'nintendo' && physIdx in GP_NINTENDO_FACE_MAP) {
+    return GP_NINTENDO_FACE_MAP[physIdx];
+  }
+  return physIdx;
+}
 
 // Focus context
 // 'sidebar-menu'  = top controls (search, sort, filters, bottom buttons)
@@ -2704,7 +2743,8 @@ let gpModalFocusIdx = 0;
 
 function gpInit() {
   window.addEventListener('gamepadconnected', (e) => {
-    console.log('[gamepad] connected:', e.gamepad.id);
+    GP.layout = gpDetectLayout(e.gamepad.id);
+    console.log(`[gamepad] connected: ${e.gamepad.id} (layout: ${GP.layout})`);
     GP.connected = true;
     gpShowHint(true);
     if (!GP.rafId) GP.rafId = requestAnimationFrame(gpPoll);
@@ -2714,6 +2754,8 @@ function gpInit() {
     GP.connected = false;
     GP.prevButtons = {};
     GP.repeatTimers = {};
+    GP.layout = 'standard';
+    GP._detectedFor = undefined;
     gpShowHint(false);
   });
 }
@@ -2801,8 +2843,17 @@ function gpPoll(timestamp) {
   const gp = [...gamepads].find(g => g && g.connected);
   if (!gp) return;
 
+  // Ensure layout is resolved even if the connect event was missed (e.g. the
+  // pad was already plugged in when the page loaded).
+  if (GP._detectedFor !== gp.index) {
+    GP.layout = gpDetectLayout(gp.id);
+    GP._detectedFor = gp.index;
+  }
+
   // ── Process buttons ────────────────────────────────────────────────────────
-  gp.buttons.forEach((btn, idx) => {
+  gp.buttons.forEach((btn, physIdx) => {
+    // Remap physical face-button indices to logical ones for Nintendo pads.
+    const idx = gpMapButtonIndex(physIdx);
     const pressed = btn.pressed;
     const wasPrev = !!GP.prevButtons[idx];
 

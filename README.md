@@ -39,7 +39,8 @@ A desktop game launcher for the classic PC game collection uploaded to [Archive.
 
 ### 🎮 Gamepad / Controller Support
 
-- Full gamepad navigation with standard W3C layout (Xbox / PS controllers)
+- Full gamepad navigation with standard W3C layout (Xbox / PlayStation controllers)
+- Nintendo Switch controller support (Pro Controller / Joy-Cons) — face buttons are auto-remapped so the button labelled **A** confirms and **B** cancels, matching the on-screen hints
 - Browse the game library, navigate menus, launch and install games entirely with a controller
 - On-screen keyboard for text input (search, notes)
 - Mouse mode via L3 toggle
