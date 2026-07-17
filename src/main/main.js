@@ -727,6 +727,28 @@ function unblockDirectory(dir) {
   return Promise.resolve();
 }
 
+// Launch an elevated exe (requireAdministrator manifest) while still setting the
+// working directory. Node's spawn/execFile can't launch these — they fail with
+// EACCES/ELEVATION_REQUIRED. PowerShell's Start-Process uses ShellExecute, which
+// honours the manifest (raising the UAC prompt) AND accepts -WorkingDirectory,
+// so the game's DLLs and data are still resolved from its own folder.
+function launchViaShellExecute(exePath, workingDir) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'win32') {
+      shell.openPath(exePath).then((msg) => (msg ? reject(new Error(msg)) : resolve()));
+      return;
+    }
+    const q = (s) => `'${String(s).replace(/'/g, "''")}'`; // single-quote escape for PS
+    const cmd = `Start-Process -FilePath ${q(exePath)} -WorkingDirectory ${q(workingDir)}`;
+    const ps = spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', cmd], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    ps.on('error', reject);
+    ps.on('exit', (code) => (code === 0 ? resolve() : reject(new Error('Launch failed (exit ' + code + ')'))));
+  });
+}
+
 ipcMain.handle('launch-game', (_, { identifier, exePath }) => {
   return new Promise(async (resolve) => {
     if (!fs.existsSync(exePath)) return resolve({ ok: false, error: 'Executable not found: ' + exePath });
@@ -739,17 +761,43 @@ ipcMain.handle('launch-game', (_, { identifier, exePath }) => {
 
     const start = Date.now();
 
-    // shell.openPath uses Windows ShellExecute — handles UAC elevation prompts
-    // correctly, unlike execFile which just gets EACCES on elevated exes.
-    shell.openPath(exePath).then((errMsg) => {
-      if (errMsg) {
-        resolve({ ok: false, error: errMsg });
-      } else {
-        // Track playtime roughly — we can't watch the process directly with openPath
-        // so we record a start time and write it when the launcher is next focused.
-        resolve({ ok: true });
-      }
-    });
+    // The working directory MUST be the exe's own folder. Many games (older
+    // titles, DOSBox wrappers, anything that loads sidecar DLLs or data via a
+    // relative path) resolve those files from the current working directory —
+    // not just the exe directory. Launching without cwd set produces "DLL not
+    // found" errors even though the DLLs sit right next to the exe. This is why
+    // shell.openPath (which inherits the launcher's cwd) was failing.
+    const workingDir = path.dirname(exePath);
+
+    let settled = false;
+    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+
+    try {
+      const child = spawn(exePath, [], {
+        cwd: workingDir,
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.on('error', (err) => {
+        // spawn can't launch elevation-required exes — fall back to a
+        // ShellExecute launch that raises UAC and still sets the working dir.
+        launchViaShellExecute(exePath, workingDir).then(
+          () => done({ ok: true }),
+          (e) => done({ ok: false, error: (err && err.message) || e.message || String(e) })
+        );
+      });
+      // Let the launcher exit independently of the game.
+      child.unref();
+      // No synchronous throw and no immediate 'error' means the process started.
+      // Give the async 'error' event a brief window to fire before reporting ok.
+      setTimeout(() => done({ ok: true }), 300);
+    } catch (e) {
+      // Synchronous failure — try the ShellExecute fallback before giving up.
+      launchViaShellExecute(exePath, workingDir).then(
+        () => done({ ok: true }),
+        (e2) => done({ ok: false, error: e2.message || e.message || String(e) })
+      );
+    }
   });
 });
 
