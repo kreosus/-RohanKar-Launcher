@@ -801,6 +801,178 @@ ipcMain.handle('launch-game', (_, { identifier, exePath }) => {
   });
 });
 
+// ─── Prerequisites (VC++ / DirectX runtimes) ─────────────────────────────────
+// Many of the archived games are 32-bit and link against Microsoft runtimes that
+// don't ship with modern Windows (VCRUNTIME140.dll, MSVCR120/100.dll, the legacy
+// DirectX June-2010 d3dx9_*.dll set). Detect what's missing and offer to install
+// the official Microsoft redistributables so users on a fresh PC don't hit the
+// "DLL not found" launch errors.
+
+const WINDIR    = process.env.SystemRoot || 'C:\\Windows';
+const SYS32     = path.join(WINDIR, 'System32');
+const SYSWOW64  = path.join(WINDIR, 'SysWOW64');
+
+const PREREQS = [
+  {
+    id: 'vc2015_2022_x86',
+    name: 'Visual C++ 2015–2022 (x86)',
+    check: [path.join(SYSWOW64, 'vcruntime140.dll'), path.join(SYSWOW64, 'msvcp140.dll')],
+    url:  'https://aka.ms/vs/17/release/vc_redist.x86.exe',
+    file: 'vc_redist.x86.exe',
+    args: ['/install', '/quiet', '/norestart'],
+  },
+  {
+    id: 'vc2015_2022_x64',
+    name: 'Visual C++ 2015–2022 (x64)',
+    check: [path.join(SYS32, 'vcruntime140.dll'), path.join(SYS32, 'msvcp140.dll')],
+    url:  'https://aka.ms/vs/17/release/vc_redist.x64.exe',
+    file: 'vc_redist.x64.exe',
+    args: ['/install', '/quiet', '/norestart'],
+  },
+  {
+    id: 'vc2013_x86',
+    name: 'Visual C++ 2013 (x86)',
+    check: [path.join(SYSWOW64, 'msvcr120.dll')],
+    url:  'https://aka.ms/highdpimfc2013x86enu',
+    file: 'vcredist_2013_x86.exe',
+    args: ['/install', '/quiet', '/norestart'],
+  },
+  {
+    id: 'vc2013_x64',
+    name: 'Visual C++ 2013 (x64)',
+    check: [path.join(SYS32, 'msvcr120.dll')],
+    url:  'https://aka.ms/highdpimfc2013x64enu',
+    file: 'vcredist_2013_x64.exe',
+    args: ['/install', '/quiet', '/norestart'],
+  },
+  {
+    id: 'vc2010_x86',
+    name: 'Visual C++ 2010 (x86)',
+    check: [path.join(SYSWOW64, 'msvcr100.dll')],
+    url:  'https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe',
+    file: 'vcredist_2010_x86.exe',
+    args: ['/q', '/norestart'],
+  },
+  {
+    id: 'vc2010_x64',
+    name: 'Visual C++ 2010 (x64)',
+    check: [path.join(SYS32, 'msvcr100.dll')],
+    url:  'https://download.microsoft.com/download/A/8/0/A80747C3-41BD-45DF-B505-E9710D2744E0/vcredist_x64.exe',
+    file: 'vcredist_2010_x64.exe',
+    args: ['/q', '/norestart'],
+  },
+  {
+    id: 'directx',
+    name: 'DirectX End-User Runtime (June 2010)',
+    check: [path.join(SYS32, 'd3dx9_43.dll'), path.join(SYSWOW64, 'd3dx9_43.dll')],
+    url:  'https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe',
+    file: 'directx_Jun2010_redist.exe',
+    directx: true,
+  },
+];
+
+function prereqInstalled(p) {
+  return p.check.every(f => fs.existsSync(f));
+}
+
+// Simple https download with redirect handling + fractional progress callback.
+function downloadTo(url, destFile, onProgress, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 6) return reject(new Error('Too many redirects'));
+    let file;
+    const req = https.get(url, { headers: { 'User-Agent': 'RohanKar-Launcher' } }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(downloadTo(res.headers.location, destFile, onProgress, redirects + 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error('HTTP ' + res.statusCode + ' for ' + url));
+      }
+      file = fs.createWriteStream(destFile);
+      const total = parseInt(res.headers['content-length'] || '0', 10);
+      let received = 0;
+      res.on('data', (chunk) => {
+        received += chunk.length;
+        if (total && onProgress) onProgress(received / total);
+      });
+      res.pipe(file);
+      file.on('finish', () => file.close(() => resolve()));
+      file.on('error', (err) => { try { fs.rmSync(destFile, { force: true }); } catch {} reject(err); });
+    });
+    req.on('error', (err) => {
+      if (file) { try { file.close(); } catch {} }
+      try { fs.rmSync(destFile, { force: true }); } catch {}
+      reject(err);
+    });
+  });
+}
+
+// Run an installer elevated (raises a single UAC prompt) and wait for it to finish.
+// Resolves with the process exit code — we treat DLL presence afterwards as the
+// real source of truth, so any exit code is accepted here.
+function runElevatedWait(exe, args = [], cwd) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'win32') return reject(new Error('Windows only'));
+    const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+    const argList = args.length ? ' -ArgumentList ' + args.map(q).join(',') : '';
+    const wd = cwd ? ' -WorkingDirectory ' + q(cwd) : '';
+    const cmd = `$p = Start-Process -FilePath ${q(exe)}${argList}${wd} -Verb RunAs -Wait -PassThru; exit $p.ExitCode`;
+    const ps = spawn('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', cmd], {
+      windowsHide: true, stdio: 'ignore',
+    });
+    ps.on('error', reject);
+    ps.on('exit', (code) => resolve(code));
+  });
+}
+
+ipcMain.handle('prereqs-check', () => {
+  if (process.platform !== 'win32') return { missing: [] };
+  const missing = PREREQS.filter(p => !prereqInstalled(p)).map(p => ({ id: p.id, name: p.name }));
+  return { missing };
+});
+
+ipcMain.handle('prereqs-install', async (event, { ids }) => {
+  if (process.platform !== 'win32') return { ok: false, error: 'Windows only', results: [] };
+  const list = PREREQS.filter(p => ids.includes(p.id));
+  const tmp  = path.join(app.getPath('temp'), 'rk-prereqs');
+  fs.mkdirSync(tmp, { recursive: true });
+  const total = list.length;
+  const results = [];
+  const send = (data) => event.sender.send('prereqs-progress', data);
+
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const base = { index: i, total, id: p.id, name: p.name };
+    const dest = path.join(tmp, p.file);
+    try {
+      send({ ...base, stage: 'downloading', percent: 0 });
+      await downloadTo(p.url, dest, (frac) => send({ ...base, stage: 'downloading', percent: Math.round(frac * 100) }));
+
+      send({ ...base, stage: 'installing', percent: 100 });
+      if (p.directx) {
+        const extractDir = path.join(tmp, 'dxredist');
+        fs.mkdirSync(extractDir, { recursive: true });
+        // Self-extract the redist, then run DXSETUP silently (elevated).
+        await runElevatedWait(dest, ['/Q', '/T:' + extractDir, '/C']);
+        await runElevatedWait(path.join(extractDir, 'DXSETUP.exe'), ['/silent'], extractDir);
+      } else {
+        await runElevatedWait(dest, p.args);
+      }
+
+      const ok = prereqInstalled(p);
+      results.push({ id: p.id, name: p.name, ok });
+      send({ ...base, stage: ok ? 'done' : 'failed', percent: 100 });
+    } catch (e) {
+      results.push({ id: p.id, name: p.name, ok: false, error: e.message });
+      send({ ...base, stage: 'failed', percent: 100, error: e.message });
+    }
+  }
+
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  return { ok: results.every(r => r.ok), results };
+});
+
 // ─── Open game location in Explorer ──────────────────────────────────────────
 
 ipcMain.handle('open-game-location', (_, { installDir }) => {

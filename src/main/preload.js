@@ -62,6 +62,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Add to Steam
   addToSteam:      (opts) => ipcRenderer.invoke('add-to-steam', opts),
 
+  // Prerequisites (VC++ / DirectX runtimes)
+  checkPrereqs:      ()    => ipcRenderer.invoke('prereqs-check'),
+  installPrereqs:    (ids) => ipcRenderer.invoke('prereqs-install', { ids }),
+  onPrereqsProgress: (cb)  => ipcRenderer.on('prereqs-progress', (_, data) => cb(data)),
+
   // App info
   getAppVersion:   () => ipcRenderer.invoke('app-version'),
   getHeroesPath:   () => ipcRenderer.invoke('heroes-path'),

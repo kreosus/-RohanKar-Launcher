@@ -585,10 +585,127 @@ async function init() {
     renderHomeRandomPick(true);
   });
 
+  // Prerequisites (runtimes) modal
+  document.getElementById('btn-close-prereqs')?.addEventListener('click', closePrereqsModal);
+  document.getElementById('btn-prereqs-later')?.addEventListener('click', async () => {
+    if (document.getElementById('prereqs-dont-ask')?.checked) await dismissPrereqsPrompt();
+    closePrereqsModal();
+  });
+  document.getElementById('btn-prereqs-install')?.addEventListener('click', onPrereqsInstall);
+  window.electronAPI.onPrereqsProgress?.(onPrereqsProgress);
+
   collections = await window.electronAPI.getCollections();
   renderCollectionFilter();
 
   await fetchGames();
+
+  // Check for missing game runtimes (VC++ / DirectX) and offer to install them.
+  checkPrerequisites();
+}
+
+// ─── Prerequisites (VC++ / DirectX runtimes) ──────────────────────────────────
+async function checkPrerequisites() {
+  if (!window.electronAPI.checkPrereqs) return;
+  let settings = {};
+  try { settings = (await window.electronAPI.getSettings()) || {}; } catch {}
+  if (settings.prereqsDismissed) return;
+
+  let res;
+  try { res = await window.electronAPI.checkPrereqs(); } catch { return; }
+  if (!res || !Array.isArray(res.missing) || res.missing.length === 0) return;
+
+  showPrereqsModal(res.missing);
+}
+
+function showPrereqsModal(missing) {
+  const modal = document.getElementById('prereqs-modal');
+  const list  = document.getElementById('prereqs-list');
+  if (!modal || !list) return;
+  list.innerHTML = '';
+  missing.forEach(m => {
+    const li = document.createElement('li');
+    li.dataset.id = m.id;
+    li.textContent = m.name;
+    list.appendChild(li);
+  });
+  modal.dataset.ids = missing.map(m => m.id).join(',');
+  document.getElementById('prereqs-progress')?.classList.add('hidden');
+  const installBtn = document.getElementById('btn-prereqs-install');
+  const laterBtn   = document.getElementById('btn-prereqs-later');
+  if (installBtn) { installBtn.disabled = false; installBtn.textContent = 'Install'; }
+  if (laterBtn)   laterBtn.disabled = false;
+  modal.classList.remove('hidden');
+}
+
+function closePrereqsModal() {
+  document.getElementById('prereqs-modal')?.classList.add('hidden');
+}
+
+async function dismissPrereqsPrompt() {
+  try {
+    const s = (await window.electronAPI.getSettings()) || {};
+    s.prereqsDismissed = true;
+    await window.electronAPI.saveSettings(s);
+  } catch {}
+}
+
+function onPrereqsProgress(data) {
+  const fill  = document.getElementById('prereqs-progress-fill');
+  const label = document.getElementById('prereqs-progress-label');
+  if (!fill || !label) return;
+  const done = data.index + (data.percent || 0) / 100;
+  const overall = Math.min(100, Math.round((done / data.total) * 100));
+  fill.style.width = overall + '%';
+  const stageTxt = {
+    downloading: 'Downloading',
+    installing:  'Installing',
+    done:        'Installed',
+    failed:      'Failed',
+  }[data.stage] || data.stage;
+  label.textContent = `${stageTxt}: ${data.name} (${data.index + 1}/${data.total})`;
+}
+
+async function onPrereqsInstall() {
+  const modal = document.getElementById('prereqs-modal');
+  const ids = (modal?.dataset.ids || '').split(',').filter(Boolean);
+  if (!ids.length) return closePrereqsModal();
+
+  const installBtn = document.getElementById('btn-prereqs-install');
+  const laterBtn   = document.getElementById('btn-prereqs-later');
+  const progWrap   = document.getElementById('prereqs-progress');
+  const label      = document.getElementById('prereqs-progress-label');
+
+  if (installBtn) { installBtn.disabled = true; installBtn.textContent = 'Installing…'; }
+  if (laterBtn)   laterBtn.disabled = true;
+  progWrap?.classList.remove('hidden');
+  if (label) label.textContent = 'Starting…';
+
+  let res;
+  try {
+    res = await window.electronAPI.installPrereqs(ids);
+  } catch (e) {
+    if (label) label.textContent = 'Install failed: ' + (e?.message || e);
+    if (installBtn) { installBtn.disabled = false; installBtn.textContent = 'Retry'; }
+    if (laterBtn)   laterBtn.disabled = false;
+    return;
+  }
+
+  if (res && res.ok) {
+    showToast('✓ Game runtimes installed — games should launch now.');
+    await dismissPrereqsPrompt();
+    closePrereqsModal();
+    return;
+  }
+
+  // Partial failure — leave the modal open so the user can retry the rest.
+  const failed = (res?.results || []).filter(r => !r.ok).map(r => r.name);
+  if (label) {
+    label.textContent = failed.length
+      ? 'Could not install: ' + failed.join(', ') + '. You can retry.'
+      : 'Some components could not be installed. You can retry.';
+  }
+  if (installBtn) { installBtn.disabled = false; installBtn.textContent = 'Retry'; }
+  if (laterBtn)   laterBtn.disabled = false;
 }
 
 // ─── Keyboard navigation ───────────────────────────────────────────────────────

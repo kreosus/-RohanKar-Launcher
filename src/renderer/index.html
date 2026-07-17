@@ -467,6 +467,32 @@
     </div>
   </div>
 
+  <!-- Prerequisites (runtimes) modal -->
+  <div id="prereqs-modal" class="hidden">
+    <div id="prereqs-inner">
+      <div id="prereqs-header">
+        <h2>Install Game Runtimes</h2>
+        <button id="btn-close-prereqs">✕</button>
+      </div>
+      <div id="prereqs-body">
+        <p id="prereqs-intro">Some Microsoft runtime components that many of these games rely on are missing from your PC. Installing them now prevents <strong>VCRUNTIME140.dll</strong>, <strong>MSVCR120.dll</strong> and DirectX errors when you launch games. These are the official Microsoft redistributables.</p>
+        <ul id="prereqs-list"></ul>
+        <div id="prereqs-progress" class="hidden">
+          <div id="prereqs-progress-label"></div>
+          <div id="prereqs-progress-track"><div id="prereqs-progress-fill"></div></div>
+        </div>
+        <p id="prereqs-note">A Windows security prompt (UAC) will appear for each component — click <strong>Yes</strong> to allow the install.</p>
+      </div>
+      <div id="prereqs-footer">
+        <label id="prereqs-skip-label"><input type="checkbox" id="prereqs-dont-ask" /> Don't ask again</label>
+        <div class="prereqs-footer-btns">
+          <button id="btn-prereqs-later">Later</button>
+          <button id="btn-prereqs-install" class="primary">Install</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Gamepad hint bar — hidden until a controller is connected -->
   <div id="gamepad-hint-bar" class="hidden"></div>
 
