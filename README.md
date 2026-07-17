@@ -86,6 +86,7 @@ Recommended hero image dimensions: **1920 × 620px**
 - [better-sqlite3](https://github.com/WiseLibs/better-sqlite3)
 - [electron-updater](https://www.electron.build/auto-update)
 - [Archive.org Advancedsearch API](https://archive.org/advancedsearch.php)
+- Archive extraction: [7zip-bin](https://github.com/develar/7zip-bin) (ZIP/7z), [extract-zip](https://github.com/max-mapper/extract-zip) (ZIP fallback), [node-unrar-js](https://github.com/YuJianrong/node-unrar-js) (RAR) — a system 7-Zip install is used automatically when present
 
 ---
 

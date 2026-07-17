@@ -1557,6 +1557,7 @@ async function startSingleDownload(queueKey, title, file, parentId) {
   if (!extractResult.ok) {
     dqSet(queueKey, { status: 'error' });
     setTimeout(() => { downloadQueue.delete(queueKey); }, 4000);
+    alert(`Failed to install "${title}":\n${extractResult.error || 'Could not extract the downloaded archive.'}`);
     return;
   }
 

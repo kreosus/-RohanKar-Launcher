@@ -509,6 +509,77 @@ ipcMain.handle('download-cancel', (_, { identifier }) => {
 
 // ─── Extract ──────────────────────────────────────────────────────────────────
 
+// Resolve a usable 7-Zip-compatible binary. Prefer a full system install (its
+// 7z.exe supports the widest format set, including .rar), then fall back to the
+// binary bundled with the 7zip-bin package so extraction works with no external
+// dependency for .zip and .7z. Returns null if nothing usable is found.
+let _cached7z; // undefined = not looked up yet, null = looked up, none found
+function resolve7zBinary() {
+  if (_cached7z !== undefined) return _cached7z;
+
+  const candidates = [
+    'C:\\Program Files\\7-Zip\\7z.exe',
+    'C:\\Program Files (x86)\\7-Zip\\7z.exe',
+    path.join(process.env.ProgramFiles || '', '7-Zip', '7z.exe'),
+    path.join(process.env['ProgramFiles(x86)'] || '', '7-Zip', '7z.exe'),
+  ];
+  for (const c of candidates) {
+    try { if (c && fs.existsSync(c)) { _cached7z = c; return _cached7z; } } catch {}
+  }
+
+  // Bundled fallback (ships with the app — no user install required).
+  try {
+    const bin = require('7zip-bin');
+    // When packaged inside app.asar the binary must be run from the unpacked copy.
+    const binPath = (bin.path7za || '').replace('app.asar', 'app.asar.unpacked');
+    if (binPath && fs.existsSync(binPath)) { _cached7z = binPath; return _cached7z; }
+  } catch (e) {
+    console.error('[extract] 7zip-bin not available:', e.message);
+  }
+
+  _cached7z = null;
+  return _cached7z;
+}
+
+// Run the 7-Zip binary to extract an archive. Resolves { ok, error }.
+function run7z(sevenZ, filePath, destDir) {
+  return new Promise((resolve) => {
+    // -y  assume Yes to all prompts   -aoa  overwrite existing files without asking
+    execFile(sevenZ, ['x', filePath, `-o${destDir}`, '-y', '-aoa'], (err, stdout, stderr) => {
+      if (err) return resolve({ ok: false, error: (stderr || err.message || '').trim() });
+      resolve({ ok: true });
+    });
+  });
+}
+
+// Extract a .rar using the pure-JS/WASM node-unrar-js library — no system
+// 7-Zip or unrar binary required. Guards against path-traversal (zip-slip).
+async function extractRarWithJs(filePath, destDir) {
+  const { createExtractorFromData } = require('node-unrar-js');
+  const buf  = fs.readFileSync(filePath);
+  const data = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  const extractor = await createExtractorFromData({ data });
+
+  const resolvedDest = path.resolve(destDir);
+  const extracted    = extractor.extract();
+  for (const file of extracted.files) {
+    const header = file.fileHeader;
+    const outPath = path.resolve(resolvedDest, header.name);
+
+    // Reject any entry that would escape the destination directory.
+    if (outPath !== resolvedDest && !outPath.startsWith(resolvedDest + path.sep)) {
+      throw new Error(`Unsafe path in archive: ${header.name}`);
+    }
+
+    if (header.flags.directory) {
+      fs.mkdirSync(outPath, { recursive: true });
+      continue;
+    }
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    if (file.extraction) fs.writeFileSync(outPath, Buffer.from(file.extraction));
+  }
+}
+
 ipcMain.handle('extract-archive', async (_, { filePath, identifier, subFolder }) => {
   const settings       = loadSettings();
   const installBase    = settings.installPath || DEFAULT_GAMES_DIR;
@@ -526,43 +597,82 @@ ipcMain.handle('extract-archive', async (_, { filePath, identifier, subFolder })
   if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
 
   const ext    = filePath.toLowerCase();
-  const sevenZ = 'C:\\Program Files\\7-Zip\\7z.exe';
+  const sevenZ = resolve7zBinary();
 
-  const unblockAfterExtract = () => unblockDirectory(destDir);
-
-  if ((ext.endsWith('.zip') || ext.endsWith('.7z') || ext.endsWith('.rar')) && fs.existsSync(sevenZ)) {
-    return new Promise((resolve) => {
-      execFile(sevenZ, ['x', filePath, `-o${destDir}`, '-y'], async (err) => {
-        if (err) return resolve({ ok: false, error: err.message });
-        await unblockAfterExtract();
-        if (settings.deleteAfterInstall) {
-          fs.unlink(filePath, () => {
-            try { fs.rmdirSync(path.dirname(filePath)); } catch {}
-          });
-        }
-        resolve({ ok: true, installDir: destDir, parentInstallDir: parentDir });
+  const finalize = async () => {
+    await unblockDirectory(destDir);
+    if (settings.deleteAfterInstall) {
+      fs.unlink(filePath, () => {
+        try { fs.rmdirSync(path.dirname(filePath)); } catch {}
       });
-    });
+    }
+    return { ok: true, installDir: destDir, parentInstallDir: parentDir };
+  };
+
+  const isZip = ext.endsWith('.zip');
+  const isRar = ext.endsWith('.rar');
+  const is7z  = ext.endsWith('.7z');
+  const isExe = ext.endsWith('.exe');
+
+  if (!isZip && !isRar && !is7z && !isExe) {
+    return { ok: false, error: 'Unsupported archive format: ' + path.extname(filePath) };
   }
 
-  // fallback: extract-zip for .zip
-  if (ext.endsWith('.zip')) {
+  // A bare .exe is the game itself (portable executable or installer) — there is
+  // nothing to extract. Make sure it lives in the install dir and register it as-is.
+  // Never delete it on deleteAfterInstall: the .exe IS the installed game.
+  if (isExe) {
     try {
-      const extractZip = require('extract-zip');
-      await extractZip(filePath, { dir: destDir });
-      await unblockAfterExtract();
-      if (settings.deleteAfterInstall) {
-        fs.unlink(filePath, () => {
-          try { fs.rmdirSync(path.dirname(filePath)); } catch {}
-        });
+      const target = path.join(destDir, path.basename(filePath));
+      if (path.resolve(target) !== path.resolve(filePath)) {
+        fs.copyFileSync(filePath, target);
+        try {
+          fs.unlinkSync(filePath);
+          fs.rmdirSync(path.dirname(filePath));
+        } catch {}
       }
+      await unblockDirectory(destDir);
       return { ok: true, installDir: destDir, parentInstallDir: parentDir };
     } catch (e) {
       return { ok: false, error: e.message };
     }
   }
 
-  return { ok: false, error: 'Unsupported archive format' };
+  // Primary path: a 7-Zip binary (system or bundled) handles .zip and .7z, and
+  // .rar too when a full system 7-Zip is present.
+  if (sevenZ) {
+    const res = await run7z(sevenZ, filePath, destDir);
+    if (res.ok) return finalize();
+    // Fall through to format-specific fallbacks below if 7-Zip couldn't handle it.
+    console.error(`[extract] 7-Zip failed on ${path.basename(filePath)}: ${res.error}`);
+  }
+
+  // Fallback for .zip — bundled extract-zip, no external dependency.
+  if (isZip) {
+    try {
+      const extractZip = require('extract-zip');
+      await extractZip(filePath, { dir: destDir });
+      return finalize();
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  // Fallback for .rar — pure-JS unrar, no external dependency.
+  if (isRar) {
+    try {
+      await extractRarWithJs(filePath, destDir);
+      return finalize();
+    } catch (e) {
+      return { ok: false, error: 'RAR extraction failed: ' + e.message };
+    }
+  }
+
+  // .7z with no working 7-Zip binary — nothing bundled can handle it.
+  return {
+    ok: false,
+    error: 'Could not extract this .7z file. Install 7-Zip (7-zip.org) and try again.',
+  };
 });
 
 // ─── Find executables in install dir ─────────────────────────────────────────

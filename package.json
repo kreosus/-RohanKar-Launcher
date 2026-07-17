@@ -14,10 +14,12 @@
     "electron-builder": "latest"
   },
   "dependencies": {
+    "7zip-bin": "^5.2.0",
     "axios": "^1.0.0",
     "better-sqlite3": "^12.6.2",
     "electron-updater": "^6.3.9",
-    "extract-zip": "^2.0.1"
+    "extract-zip": "^2.0.1",
+    "node-unrar-js": "^2.0.2"
   },
   "build": {
     "appId": "com.rohankar.launcher",
@@ -25,6 +27,10 @@
     "files": [
       "src/**/*",
       "assets/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/7zip-bin/**",
+      "node_modules/node-unrar-js/**"
     ],
     "extraResources": [
       {
